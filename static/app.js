@@ -1153,6 +1153,418 @@
     if (baseline) renderBaselineMeta();
   });
 
+  /* ---------------- 变量契约审计 ---------------- */
+
+  var CONTRACT_IMPORT_ID_SEQ = 1;
+  var contractScenarios = [];   // 导入的审计场景 [{id,name,locale,variables}]
+  var lastContract = null;      // 最近一次 /api/contract-audit 响应
+  var contractTemplate = null;  // 最近一次审计时的模板（用于过期提示）
+
+  var contractImportFileEl = document.getElementById("contractImportFile");
+  var contractNoticesEl = document.getElementById("contractNotices");
+  var contractMetaEl = document.getElementById("contractMeta");
+  var contractCountEl = document.getElementById("contractCount");
+  var contractScenarioListEl = document.getElementById("contractScenarioList");
+  var contractSummaryEl = document.getElementById("contractSummary");
+  var contractVarsEl = document.getElementById("contractVars");
+  var contractSchemaEl = document.getElementById("contractSchema");
+
+  var CODE_LABELS = {
+    missing_required: ["缺失必需变量", "error"],
+    missing_conditional: ["缺失条件变量", "warning"],
+    type_conflict: ["类型冲突", "error"],
+    invalid_plural_value: ["无效复数值", "error"],
+    invalid_selector: ["无匹配 select 分支", "error"],
+    unused_variable: ["未使用变量", "info"],
+    invalid_scenario: ["场景非法", "error"],
+    template_type_conflict: ["模板内类型冲突", "error"],
+  };
+
+  function codeHtml(code) {
+    var meta = CODE_LABELS[code] || [code, "warning"];
+    return '<span class="c-issue-tag c-sev-' + meta[1] + '">' + meta[0] + "</span>";
+  }
+
+  function typeBadgeContract(cd) {
+    var map = {
+      number: ["数字", "ct-number"],
+      string: ["字符串", "ct-string"],
+      any: ["任意标量", "ct-any"],
+      conflict: ["数字/字符串冲突", "ct-conflict"],
+    };
+    var m = map[cd.resolved_type] || ["—", "ct-any"];
+    return '<span class="c-type-badge ' + m[1] + '">' + m[0] + "</span>";
+  }
+
+  function locateTemplatePos(pos) {
+    if (pos === null || pos === undefined) return;
+    tpl.focus();
+    tpl.setSelectionRange(pos, Math.min(tpl.value.length, pos + 1));
+    var wrap = document.getElementById("editorWrap");
+    wrap.classList.remove("editor-flash");
+    void wrap.offsetWidth;
+    wrap.classList.add("editor-flash");
+  }
+
+  function normalizeImportedScenarios(data) {
+    var list = null;
+    if (Array.isArray(data)) {
+      list = data;
+    } else if (data && typeof data === "object") {
+      if (Array.isArray(data.scenarios)) list = data.scenarios;
+    }
+    if (!list) {
+      toast("导入文件格式无法识别：需要场景数组或含 scenarios 的对象");
+      return null;
+    }
+    var out = [];
+    list.forEach(function (raw) {
+      if (!raw || typeof raw !== "object") return;
+      out.push({
+        id: "a" + CONTRACT_IMPORT_ID_SEQ++,
+        name: String(raw.name || "") || ("导入场景 " + (out.length + 1)),
+        locale: typeof raw.locale === "string" && raw.locale ? raw.locale : "en",
+        variables: raw.variables && typeof raw.variables === "object"
+          && !Array.isArray(raw.variables) ? raw.variables : {},
+      });
+    });
+    return out;
+  }
+
+  function importScenarios(list, sourceLabel) {
+    if (!list || !list.length) {
+      toast("文件中没有可用场景");
+      return;
+    }
+    contractScenarios = list;
+    lastContract = null;
+    renderContractScenarios();
+    renderContractVars();
+    contractMetaEl.textContent =
+      "已从" + sourceLabel + "导入 " + list.length + " 个场景，点击「运行审计」。";
+    toast("已导入 " + list.length + " 个审计场景");
+  }
+
+  document.getElementById("btnContractImport").addEventListener("click", function () {
+    contractImportFileEl.value = "";
+    contractImportFileEl.click();
+  });
+
+  contractImportFileEl.addEventListener("change", function () {
+    var file = contractImportFileEl.files && contractImportFileEl.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      var data;
+      try { data = JSON.parse(reader.result); }
+      catch (e) { toast("文件不是有效的 JSON：" + e.message); return; }
+      var list = normalizeImportedScenarios(data);
+      if (list) importScenarios(list, "文件");
+    };
+    reader.readAsText(file);
+  });
+
+  document.getElementById("btnContractUseScenarios").addEventListener("click", function () {
+    if (!scenarios.length) { toast("「场景集回归」中还没有已保存场景"); return; }
+    var list = scenarios.map(function (sc) {
+      return {
+        id: "a" + CONTRACT_IMPORT_ID_SEQ++,
+        name: sc.name,
+        locale: sc.locale || "en",
+        variables: sc.variables || {},
+      };
+    });
+    importScenarios(list, "已保存场景");
+  });
+
+  function renderContractScenarios() {
+    contractCountEl.textContent =
+      contractScenarios.length ? "（" + contractScenarios.length + "）" : "";
+    contractScenarioListEl.innerHTML = "";
+    if (!contractScenarios.length) {
+      contractScenarioListEl.innerHTML =
+        '<div class="empty">尚未导入场景。点「导入场景 JSON」选择场景集导出文件或场景数组，也可点「用已保存场景」直接使用上方保存的场景。</div>';
+      return;
+    }
+    var results = lastContract ? lastContract.scenarios : [];
+    contractScenarios.forEach(function (sc, i) {
+      var row = document.createElement("div");
+      var res = results[i];
+      var status = res ? res.status : "idle";
+      row.className = "csc-row" + (status === "failed" ? " failed"
+        : status === "passed" ? " passed" : "");
+
+      var head = document.createElement("div");
+      head.className = "csc-head";
+      var badge = status === "passed"
+        ? '<span class="sc-status sc-passed">通过</span>'
+        : status === "failed"
+          ? '<span class="sc-status sc-failed">失败</span>'
+          : '<span class="sc-status sc-idle">未审计</span>';
+      head.innerHTML = '<span class="csc-name">' + esc(sc.name) + "</span>" +
+        "<code>" + esc(sc.locale || "en") + "</code>" + badge;
+      row.appendChild(head);
+
+      var meta = document.createElement("div");
+      meta.className = "scenario-meta";
+      meta.textContent = Object.keys(sc.variables).length + " 个变量";
+      row.appendChild(meta);
+
+      if (res && res.issues && res.issues.length) {
+        var box = document.createElement("div");
+        box.className = "csc-issues";
+        res.issues.slice(0, 4).forEach(function (iss) {
+          var line = document.createElement("div");
+          line.className = "csc-issue csev-" + iss.severity;
+          line.innerHTML = codeHtml(iss.code) +
+            '<span class="csc-issue-msg">' + esc(iss.message) + "</span>";
+          if (iss.template_pos !== null && iss.template_pos !== undefined) {
+            line.title = "点击定位到模板首次出现位置（第 " +
+              iss.template_line + " 行 " + iss.template_col + " 列）";
+            line.addEventListener("click", function () {
+              locateTemplatePos(iss.template_pos);
+            });
+          }
+          box.appendChild(line);
+        });
+        if (res.issues.length > 4) {
+          var more = document.createElement("div");
+          more.className = "csc-more";
+          more.textContent = "…另有 " + (res.issues.length - 4) + " 条，见右侧按变量聚合";
+          box.appendChild(more);
+        }
+        row.appendChild(box);
+      }
+      contractScenarioListEl.appendChild(row);
+    });
+  }
+
+  function renderContractVars() {
+    if (!lastContract) {
+      contractSummaryEl.textContent = "";
+      contractVarsEl.innerHTML =
+        '<div class="empty">尚未运行审计。导入场景后点「运行审计」。</div>';
+      contractSchemaEl.textContent = "（运行审计后生成）";
+      return;
+    }
+    var sm = lastContract.summary;
+    contractSummaryEl.textContent =
+      "变量 " + sm.variables_total + "（必需 " + sm.required_total +
+      " · 条件 " + sm.conditional_total +
+      (sm.type_conflicts_in_template ? " · 模板冲突 " + sm.type_conflicts_in_template : "") +
+      "）｜场景通过 " + sm.scenarios_passed + "/" + sm.scenarios_total +
+      "｜错误 " + sm.errors + " · 警告 " + sm.warnings + " · 提示 " + sm.infos;
+
+    contractVarsEl.innerHTML = "";
+    if (!lastContract.variables.length) {
+      contractVarsEl.innerHTML = '<div class="empty">模板没有使用任何变量。</div>';
+    }
+    lastContract.variables.forEach(function (entry) {
+      var cd = entry.contract;
+      var card = document.createElement("div");
+      card.className = "cvar-card" + (!entry.in_template ? " extra" : "");
+      if (entry.template_issue) card.classList.add("has-tpl-conflict");
+
+      var head = document.createElement("div");
+      head.className = "cvar-head";
+      var badges = typeBadgeContract(cd);
+      if (entry.in_template) {
+        badges += cd.required
+          ? '<span class="c-req-badge req-required">必需</span>'
+          : '<span class="c-req-badge req-conditional">条件必需</span>';
+      } else {
+        badges += '<span class="c-req-badge req-extra">模板未使用</span>';
+      }
+      head.innerHTML = '<span class="cvar-name">' + esc(cd.name) + "</span>" + badges;
+      if (entry.in_template && cd.first_pos !== null && cd.first_pos !== undefined) {
+        head.title = "点击定位到模板首次出现位置（第 " +
+          cd.first_line + " 行 " + cd.first_col + " 列）";
+        head.addEventListener("click", function () { locateTemplatePos(cd.first_pos); });
+      }
+      card.appendChild(head);
+
+      if (entry.in_template && cd.usage_labels.length) {
+        var kinds = document.createElement("div");
+        kinds.className = "cvar-kinds";
+        cd.usage_labels.forEach(function (k, idx) {
+          var chip = document.createElement("span");
+          chip.className = "chip";
+          chip.textContent = k + (cd.usage_kinds[idx] === "hash" ? "" : "");
+          kinds.appendChild(chip);
+        });
+        card.appendChild(kinds);
+      }
+
+      if (entry.in_template && cd.select) {
+        var sel = document.createElement("div");
+        sel.className = "cvar-select";
+        sel.innerHTML = "select 分支键：<code>" +
+          esc(cd.select.selectors.join("、")) + "</code>" +
+          (cd.select.has_other ? "" : "（<b>无 other 兜底</b>）");
+        card.appendChild(sel);
+      }
+
+      if (entry.in_template && !cd.required && cd.guards.length) {
+        var guards = document.createElement("div");
+        guards.className = "cvar-guards";
+        guards.textContent = "仅出现在分支：" + cd.guards.slice(0, 2).join("；") +
+          (cd.guards.length > 2 ? " 等 " + cd.guards.length + " 条路径" : "");
+        card.appendChild(guards);
+      }
+
+      if (entry.template_issue) {
+        var t = document.createElement("div");
+        t.className = "cvar-tpl-conflict";
+        t.innerHTML = codeHtml("template_type_conflict") +
+          '<span>' + esc(entry.template_issue.message) + "</span>";
+        card.appendChild(t);
+      }
+
+      if (entry.groups.length) {
+        var gl = document.createElement("div");
+        gl.className = "cvar-groups";
+        entry.groups.forEach(function (g) {
+          var row = document.createElement("div");
+          row.className = "cvar-group csev-" + g.severity;
+          var names = g.occurrences.map(function (o) {
+            return o.scenario.name;
+          }).join("、");
+          row.innerHTML = codeHtml(g.code) +
+            '<span class="cvar-group-count">×' + g.count + "</span>" +
+            '<span class="cvar-group-first">首次：' + esc(g.first.name) + "</span>" +
+            '<span class="cvar-group-msg">' + esc(g.message) + "</span>" +
+            '<span class="cvar-group-sc">场景：' + esc(names) + "</span>";
+          gl.appendChild(row);
+        });
+        card.appendChild(gl);
+      }
+      contractVarsEl.appendChild(card);
+    });
+
+    contractSchemaEl.textContent =
+      JSON.stringify(lastContract.json_schema, null, 2);
+  }
+
+  function renderContractNotices() {
+    contractNoticesEl.innerHTML = "";
+    if (!lastContract) return;
+    function add(cls, html) {
+      var d = document.createElement("div");
+      d.className = "msg " + cls;
+      d.innerHTML = html;
+      contractNoticesEl.appendChild(d);
+    }
+    if (!lastContract.template_ok) {
+      var msgs = (lastContract.errors || []).map(function (e) {
+        return e.message;
+      }).join("；");
+      add("msg-error", '<span class="tag">模板错误</span><span>' +
+        esc(msgs) + "（契约基于可恢复的 AST 推导）</span>");
+    }
+    (lastContract.template_issues || []).forEach(function (i) {
+      var d = document.createElement("div");
+      d.className = "msg msg-error";
+      d.innerHTML = '<span class="tag">模板冲突</span><span>' +
+        esc(i.message) + "</span>";
+      if (i.template_pos !== null && i.template_pos !== undefined) {
+        d.title = "点击定位";
+        d.addEventListener("click", function () { locateTemplatePos(i.template_pos); });
+      }
+      contractNoticesEl.appendChild(d);
+    });
+    if (contractTemplate !== null && contractTemplate !== tpl.value) {
+      add("msg-warning",
+          '<span class="tag">已过期</span><span>审计基于此前的模板内容，' +
+          '当前模板已修改，请重新点「运行审计」。</span>');
+    }
+  }
+
+  function runContractAudit() {
+    if (!contractScenarios.length) {
+      toast("请先导入审计场景");
+      return Promise.resolve(null);
+    }
+    contractMetaEl.textContent = "审计中…";
+    return fetch("/api/contract-audit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        template: tpl.value,
+        scenarios: contractScenarios.map(function (sc) {
+          return { id: sc.id, name: sc.name, locale: sc.locale,
+                   variables: sc.variables };
+        }),
+      }),
+    })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || "请求失败"); });
+        return r.json();
+      })
+      .then(function (resp) {
+        lastContract = resp;
+        contractTemplate = tpl.value;
+        renderContractNotices();
+        renderContractScenarios();
+        renderContractVars();
+        var sm = resp.summary;
+        contractMetaEl.textContent =
+          "审计完成：" + sm.scenarios_passed + "/" + sm.scenarios_total +
+          " 个场景通过；缺失 " + sm.missing_total + "、类型冲突 " +
+          sm.type_conflict_total + "、无效复数值 " + sm.invalid_plural_total +
+          "、无效 select 键 " + sm.invalid_selector_total +
+          (sm.type_conflicts_in_template ? "；模板内类型冲突 " +
+            sm.type_conflicts_in_template + " 处" : "");
+        return resp;
+      })
+      .catch(function (e) {
+        contractMetaEl.textContent = "";
+        contractNoticesEl.innerHTML =
+          '<div class="msg msg-error"><span class="tag">错误</span><span>' +
+          esc("审计失败：" + (e.message || e)) + "</span></div>";
+        toast("审计失败：" + (e.message || e));
+        return null;
+      });
+  }
+
+  document.getElementById("btnContractRun").addEventListener("click", runContractAudit);
+
+  document.getElementById("btnContractCopySchema").addEventListener("click", function () {
+    if (!lastContract) { toast("请先运行审计"); return; }
+    copyText(JSON.stringify(lastContract.json_schema, null, 2), "已复制 JSON Schema 草案");
+  });
+
+  document.getElementById("btnContractExport").addEventListener("click", function () {
+    if (!lastContract) { toast("请先运行审计"); return; }
+    var data = {
+      tool: "icu-branch-previewer",
+      report: "variable-contract-audit",
+      exported_at: new Date().toISOString(),
+      template: contractTemplate,
+      template_ok: lastContract.template_ok,
+      template_errors: lastContract.errors,
+      scenarios: contractScenarios.map(function (sc) {
+        return { name: sc.name, locale: sc.locale, variables: sc.variables };
+      }),
+      summary: lastContract.summary,
+      contracts: lastContract.contracts,
+      template_issues: lastContract.template_issues,
+      variables: lastContract.variables,
+      issues: lastContract.issues,
+      json_schema: lastContract.json_schema,
+    };
+    var blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "icu-contract-audit.json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+    toast("已导出审计 JSON");
+  });
+
+  tpl.addEventListener("input", renderContractNotices);
+
   /* ---------------- 初始化 ---------------- */
 
   tpl.value = DEFAULT_TEMPLATE;

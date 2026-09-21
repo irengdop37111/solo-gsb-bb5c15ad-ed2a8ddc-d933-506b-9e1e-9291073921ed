@@ -4,6 +4,7 @@ import os
 from flask import Flask, jsonify, render_template, request
 
 from compare import compare_templates
+from contract import audit_contract
 from icu import MAX_SCENARIOS, analyze, run_scenarios
 
 app = Flask(__name__)
@@ -88,6 +89,36 @@ def compare():
             "variables": sc.get("variables", {}),
         })
     return jsonify(compare_templates(old_template, new_template, norm))
+
+
+@app.post("/api/contract-audit")
+def contract_audit():
+    """变量契约审计：推导变量类型契约，批量审计多组场景样例。"""
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+    template = data.get("template", "")
+    scenarios = data.get("scenarios", [])
+    if not isinstance(template, str):
+        return jsonify({"ok": False, "error": "template 必须是字符串"}), 400
+    if not isinstance(scenarios, list):
+        return jsonify({"ok": False, "error": "scenarios 必须是数组"}), 400
+    if len(scenarios) > MAX_SCENARIOS:
+        return jsonify({"ok": False,
+                        "error": f"单次最多审计 {MAX_SCENARIOS} 个场景"}), 400
+    norm = []
+    for idx, sc in enumerate(scenarios):
+        if not isinstance(sc, dict):
+            return jsonify({"ok": False,
+                            "error": f"第 {idx + 1} 个场景必须是对象"}), 400
+        norm.append({
+            "id": sc.get("id", idx + 1),
+            "name": str(sc.get("name") or "") or f"场景 {idx + 1}",
+            "locale": sc.get("locale", "en"),
+            "variables": sc.get("variables")
+            if isinstance(sc.get("variables"), dict) else {},
+        })
+    return jsonify(audit_contract(template, norm))
 
 
 @app.get("/api/health")

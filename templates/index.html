@@ -173,6 +173,57 @@
     </div>
   </section>
 
+  <!-- 变量契约审计面板 -->
+  <section class="contract-panel">
+    <div class="panel-head contract-title-row">
+      <h2>变量契约审计</h2>
+      <span class="hint">从模板 AST 推导每个变量在简单占位 / number / plural / select / selectordinal 中的允许类型与必需性；导入多组场景样例，批量报告缺失变量、类型冲突、无效复数值及其首次出现位置，按变量聚合并生成可复制的 JSON Schema 草案</span>
+      <div class="contract-actions">
+        <input type="file" id="contractImportFile" accept=".json,application/json" hidden>
+        <button id="btnContractImport" class="btn btn-outline"
+                title="导入场景集导出文件，或直接导入场景数组 / {'scenarios': [...]}">导入场景 JSON</button>
+        <button id="btnContractUseScenarios" class="btn btn-outline"
+                title="使用上方「场景集回归」中已保存的全部场景">用已保存场景</button>
+        <button id="btnContractRun" class="btn"
+                title="按当前模板对导入的场景批量执行契约审计">运行审计</button>
+        <button id="btnContractCopySchema" class="btn btn-outline"
+                title="把推导生成的 JSON Schema 草案复制到剪贴板">复制 Schema</button>
+        <button id="btnContractExport" class="btn btn-outline"
+                title="导出包含模板、场景、变量契约与审计结果的 JSON 文件">导出审计 JSON</button>
+      </div>
+    </div>
+    <div class="contract-body">
+      <div id="contractNotices"></div>
+      <div id="contractMeta" class="contract-meta"></div>
+      <div class="contract-grid">
+        <!-- 左：审计场景 -->
+        <div class="contract-col">
+          <div class="panel-head">
+            <h3>审计场景 <span id="contractCount" class="hint"></span></h3>
+          </div>
+          <div id="contractScenarioList" class="contract-scenario-list">
+            <div class="empty">尚未导入场景。点「导入场景 JSON」选择场景集导出文件或场景数组，也可点「用已保存场景」直接使用上方保存的场景。</div>
+          </div>
+        </div>
+
+        <!-- 右：变量聚合 + Schema -->
+        <div class="contract-col">
+          <div class="panel-head">
+            <h3>按变量聚合 <span id="contractSummary" class="hint"></span></h3>
+          </div>
+          <div id="contractVars" class="contract-vars">
+            <div class="empty">尚未运行审计。导入场景后点「运行审计」。</div>
+          </div>
+          <div class="panel-head">
+            <h3>JSON Schema 草案</h3>
+            <span class="hint">draft-07；条件必需变量见 description</span>
+          </div>
+          <pre id="contractSchema" class="contract-schema">（运行审计后生成）</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <div id="toast" class="toast"></div>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
