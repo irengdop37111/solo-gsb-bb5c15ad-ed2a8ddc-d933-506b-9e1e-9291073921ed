@@ -4,6 +4,7 @@ import os
 from flask import Flask, jsonify, render_template, request
 
 from compare import compare_templates
+from contract import audit_contract
 from icu import MAX_SCENARIOS, analyze, run_scenarios
 
 app = Flask(__name__)
@@ -37,25 +38,54 @@ def scenarios_run():
     if not isinstance(data, dict):
         return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
     template = data.get("template", "")
-    scenarios = data.get("scenarios", [])
     if not isinstance(template, str):
         return jsonify({"ok": False, "error": "template 必须是字符串"}), 400
+    norm, err = _normalize_scenarios(data.get("scenarios", []))
+    if err is not None:
+        return err
+    return jsonify(run_scenarios(template, norm))
+
+
+def _normalize_scenarios(scenarios):
+    """把请求中的场景列表规范化为审计/回归共用的内部格式。
+
+    返回 (norm, error_response)；error_response 非空时应直接返回该响应。
+    """
     if not isinstance(scenarios, list):
-        return jsonify({"ok": False, "error": "scenarios 必须是数组"}), 400
+        return None, (jsonify({"ok": False, "error": "scenarios 必须是数组"}), 400)
     if len(scenarios) > MAX_SCENARIOS:
-        return jsonify({"ok": False,
-                        "error": f"单次最多运行 {MAX_SCENARIOS} 个场景"}), 400
+        return None, (jsonify({"ok": False,
+                               "error": f"单次最多运行 {MAX_SCENARIOS} 个场景"}), 400)
     norm = []
     for sc in scenarios:
         if not isinstance(sc, dict):
-            return jsonify({"ok": False, "error": "每个场景必须是对象"}), 400
+            return None, (jsonify({"ok": False,
+                                   "error": "每个场景必须是对象"}), 400)
         norm.append({
             "id": sc.get("id"),
             "name": str(sc.get("name") or ""),
             "locale": sc.get("locale", "en"),
             "variables": sc.get("variables", {}),
         })
-    return jsonify(run_scenarios(template, norm))
+    return norm, None
+
+
+@app.post("/api/contract-audit")
+def contract_audit():
+    """变量契约审计：推导模板变量类型/必需性契约，批量审计场景样例。"""
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+    template = data.get("template", "")
+    if not isinstance(template, str):
+        return jsonify({"ok": False, "error": "template 必须是字符串"}), 400
+    norm, err = _normalize_scenarios(data.get("scenarios", []))
+    if err is not None:
+        return err
+    locale = data.get("locale", "en")
+    if not isinstance(locale, str) or not locale.strip():
+        locale = "en"
+    return jsonify(audit_contract(template, norm, locale.strip() or "en"))
 
 
 @app.post("/api/compare")
@@ -70,23 +100,9 @@ def compare():
         return jsonify({"ok": False,
                         "error": "old_template 与 new_template 必须是字符串"}), 400
     scenarios = data.get("scenarios")
-    if scenarios is None:
-        scenarios = []
-    if not isinstance(scenarios, list):
-        return jsonify({"ok": False, "error": "scenarios 必须是数组"}), 400
-    if len(scenarios) > MAX_SCENARIOS:
-        return jsonify({"ok": False,
-                        "error": f"单次最多回放 {MAX_SCENARIOS} 个场景"}), 400
-    norm = []
-    for sc in scenarios:
-        if not isinstance(sc, dict):
-            return jsonify({"ok": False, "error": "每个场景必须是对象"}), 400
-        norm.append({
-            "id": sc.get("id"),
-            "name": str(sc.get("name") or ""),
-            "locale": sc.get("locale", "en"),
-            "variables": sc.get("variables", {}),
-        })
+    norm, err = _normalize_scenarios([] if scenarios is None else scenarios)
+    if err is not None:
+        return err
     return jsonify(compare_templates(old_template, new_template, norm))
 
 

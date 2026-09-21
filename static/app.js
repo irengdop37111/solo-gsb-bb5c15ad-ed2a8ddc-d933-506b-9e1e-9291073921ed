@@ -1153,6 +1153,379 @@
     if (baseline) renderBaselineMeta();
   });
 
+  /* ---------------- 变量契约审计 ---------------- */
+
+  var auditContractsEl = document.getElementById("auditContracts");
+  var auditVarCountEl = document.getElementById("auditVarCount");
+  var auditScenariosEl = document.getElementById("auditScenarios");
+  var auditScenarioMetaEl = document.getElementById("auditScenarioMeta");
+  var auditSummaryBarEl = document.getElementById("auditSummaryBar");
+  var auditSchemaEl = document.getElementById("auditSchema");
+  var auditImportFileEl = document.getElementById("auditImportFile");
+
+  var lastAudit = null;        // 最近一次 /api/contract-audit 响应
+  var auditScenariosInput = []; // 导入的场景（为空时使用已保存场景）
+  var auditSource = "saved";   // saved | imported
+  var auditTimer = null;
+
+  function auditCodeLabel(code) {
+    return {
+      missing: "缺失变量",
+      missing_optional: "缺失可选变量",
+      type: "类型冲突",
+      invalid_plural: "无效复数值",
+      unused: "多余变量",
+    }[code] || code;
+  }
+
+  function auditCodeBadge(code, severity) {
+    var cls = severity === "warning" ? "warning" : code;
+    return '<span class="audit-badge audit-' + cls + '">' +
+      auditCodeLabel(code) + "</span>";
+  }
+
+  /* 规范化导入的场景：支持 {scenarios:[...]} 包装格式与裸数组 */
+  function normalizeImportedScenarios(data) {
+    var list = Array.isArray(data) ? data
+      : (data && Array.isArray(data.scenarios)) ? data.scenarios : null;
+    if (!list) return null;
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i];
+      if (!s || typeof s !== "object" || Array.isArray(s)) continue;
+      var vars = s.variables;
+      if (vars === undefined || vars === null) vars = {};
+      if (typeof vars !== "object" || Array.isArray(vars)) continue;
+      out.push({
+        id: s.id == null ? "i" + (i + 1) : s.id,
+        name: String(s.name == null || s.name === "" ? "导入场景 " + (i + 1) : s.name),
+        locale: typeof s.locale === "string" && s.locale.trim() ? s.locale : "en",
+        variables: vars,
+      });
+    }
+    return out;
+  }
+
+  function runAudit(list, source) {
+    auditScenariosInput = list || [];
+    auditSource = source || (list && list.length ? "imported" : "saved");
+    return fetch("/api/contract-audit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        template: tpl.value,
+        locale: localeInput.value.trim() || "en",
+        scenarios: auditScenariosInput,
+      }),
+    })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || "请求失败"); });
+        return r.json();
+      })
+      .then(function (resp) {
+        lastAudit = resp;
+        renderAudit();
+        return resp;
+      })
+      .catch(function (e) {
+        auditSummaryBarEl.innerHTML =
+          '<span class="audit-bar-error">✕ 审计失败：' + esc(e.message || e) + "</span>";
+        toast("契约审计失败：" + (e.message || e));
+        return null;
+      });
+  }
+
+  function scheduleAudit(list, source) {
+    clearTimeout(auditTimer);
+    auditTimer = setTimeout(function () { runAudit(list, source); }, 400);
+  }
+
+  function valuePreview(v) {
+    var s;
+    try { s = JSON.stringify(v); } catch (e) { s = String(v); }
+    if (s === undefined) s = String(v);
+    return s.length > 60 ? s.slice(0, 60) + "…" : s;
+  }
+
+  function locateTemplatePos(pos) {
+    if (pos === null || pos === undefined) return;
+    tpl.focus();
+    tpl.setSelectionRange(pos, Math.min(tpl.value.length, pos + 1));
+    tpl.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  function renderAudit() {
+    if (!lastAudit) return;
+    var a = lastAudit;
+
+    if (!a.ok) {
+      auditSummaryBarEl.innerHTML =
+        '<span class="audit-bar-error">✕ 模板存在 ' + (a.errors || []).length +
+        " 个语法错误，无法推导契约，请先修正模板</span>";
+      auditContractsEl.innerHTML = "";
+      auditScenariosEl.innerHTML = "";
+      auditSchemaEl.textContent = "（模板有语法错误）";
+      return;
+    }
+
+    var sm = a.summary || {};
+    var bar =
+      '<span class="audit-bar-item"><b>' + sm.variables_total + "</b> 个变量" +
+      "（必需 <b>" + sm.required_total + "</b>）</span>" +
+      '<span class="audit-bar-item">场景通过 <b>' +
+      sm.passed_scenarios + "/" + sm.total_scenarios + "</b></span>" +
+      '<span class="audit-bar-item audit-cnt-error">缺失 <b>' + sm.missing_count +
+      "</b></span>" +
+      '<span class="audit-bar-item audit-cnt-warning">缺失可选 <b>' +
+      (sm.missing_optional_count || 0) + "</b></span>" +
+      '<span class="audit-bar-item audit-cnt-error">类型冲突 <b>' + sm.type_count +
+      "</b></span>" +
+      '<span class="audit-bar-item audit-cnt-error">无效复数值 <b>' +
+      sm.invalid_plural_count + "</b></span>" +
+      '<span class="audit-bar-item audit-cnt-warning">多余变量 <b>' +
+      sm.unused_count + "</b></span>";
+    if (sm.conflicting_total) {
+      bar += '<span class="audit-bar-item audit-cnt-error">契约冲突 <b>' +
+        sm.conflicting_total + "</b></span>";
+    }
+    if (sm.paths_truncated) {
+      bar += '<span class="audit-bar-item audit-cnt-warning">分支路径过多，必需性为近似结果</span>';
+    }
+    bar += '<span class="audit-bar-source">样例来源：' +
+      (auditSource === "imported"
+        ? "导入文件（" + auditScenariosInput.length + " 组）"
+        : "已保存场景（" + scenarios.length + " 组）") + "</span>";
+    auditSummaryBarEl.innerHTML = bar;
+
+    auditVarCountEl.textContent = "（" + sm.variables_total + "）";
+
+    /* ---- 契约卡片 ---- */
+    auditContractsEl.innerHTML = "";
+    if (!(a.contracts || []).length) {
+      auditContractsEl.innerHTML = '<div class="empty">模板没有使用任何变量。</div>';
+    }
+    (a.contracts || []).forEach(function (c) {
+      var card = document.createElement("div");
+      card.className = "contract-card" +
+        (c.conflicting ? " contract-conflict" : "") +
+        (c.issues && c.issues.length ? "" : " contract-clean");
+
+      var head = document.createElement("div");
+      head.className = "contract-head";
+      var typeText = c.conflicting ? "无兼容类型" : c.allowed_types.join(" / ");
+      head.innerHTML =
+        '<code class="contract-name">' + esc(c.name) + "</code>" +
+        '<span class="contract-types">' + esc(typeText) + "</span>" +
+        (c.required
+          ? '<span class="audit-badge audit-required">必需</span>'
+          : '<span class="audit-badge audit-optional">可选</span>') +
+        c.context_labels.map(function (l) {
+          return '<span class="contract-ctx">' + esc(l) + "</span>";
+        }).join("");
+      var locBtn = document.createElement("button");
+      locBtn.className = "btn btn-small contract-locate";
+      locBtn.textContent = "第 " + c.line + ":" + c.col + " 行";
+      locBtn.title = "点击在模板中定位首次出现位置";
+      locBtn.addEventListener("click", function () { locateTemplatePos(c.first_pos); });
+      head.appendChild(locBtn);
+      card.appendChild(head);
+
+      if (c.selectors && c.selectors.length) {
+        var sel = document.createElement("div");
+        sel.className = "contract-selectors";
+        sel.innerHTML = '<span class="contract-sub">select 取值：</span>' +
+          c.selectors.map(function (s) {
+            return '<code>' + esc(s) + "</code>";
+          }).join(" ");
+        card.appendChild(sel);
+      }
+
+      if (c.notes && c.notes.length) {
+        var notes = document.createElement("div");
+        notes.className = "contract-notes";
+        notes.innerHTML = c.notes.map(function (n) {
+          return "⚠ " + esc(n);
+        }).join("<br>");
+        card.appendChild(notes);
+      }
+
+      (c.issues || []).forEach(function (it) {
+        var issue = document.createElement("div");
+        issue.className = "contract-issue audit-sev-" + it.severity;
+        var occText = it.count > 1
+          ? "（首次：" + (it.first.scenario_name || "场景 " + (it.first.scenario_index + 1)) +
+            "，共 " + it.count + " 次）"
+          : "（" + (it.first.scenario_name || "场景 " + (it.first.scenario_index + 1)) + "）";
+        issue.innerHTML = auditCodeBadge(it.code, it.severity) +
+          '<span class="issue-msg">' + esc(it.message) + "</span>" +
+          '<span class="issue-occ">' + esc(occText) + "</span>";
+        card.appendChild(issue);
+      });
+
+      // 每个变量的 schema 片段，便于单独复制
+      var frag = a.json_schema.properties[c.name];
+      if (frag) {
+        var schemaRow = document.createElement("div");
+        schemaRow.className = "contract-schema-row";
+        var copyBtn = document.createElement("button");
+        copyBtn.className = "btn btn-small";
+        copyBtn.textContent = "复制该变量 Schema";
+        copyBtn.addEventListener("click", function () {
+          var obj = {};
+          obj[c.name] = frag;
+          copyText(JSON.stringify(obj, null, 2), "已复制变量 " + c.name + " 的 Schema 片段");
+        });
+        schemaRow.appendChild(copyBtn);
+        card.appendChild(schemaRow);
+      }
+
+      auditContractsEl.appendChild(card);
+    });
+
+    // 模板未使用但场景提供的变量（unused 聚合项没有契约卡片）
+    (a.orphan_issues || []).forEach(function (it) {
+      var card = document.createElement("div");
+      card.className = "contract-card contract-orphan";
+      var occText = it.count > 1
+        ? "（首次：" + (it.first.scenario_name || "场景 " + (it.first.scenario_index + 1)) +
+          "，共 " + it.count + " 次）"
+        : "（" + (it.first.scenario_name || "场景 " + (it.first.scenario_index + 1)) + "）";
+      card.innerHTML =
+        '<div class="contract-head"><code class="contract-name">' +
+        esc(it.variable) + "</code>" + auditCodeBadge(it.code, it.severity) +
+        '<span class="issue-occ">' + esc(occText) + "</span></div>" +
+        '<div class="contract-issue audit-sev-warning">' +
+        '<span class="issue-msg">' + esc(it.message) + "</span></div>";
+      auditContractsEl.appendChild(card);
+    });
+
+    /* ---- 场景结果 ---- */
+    auditScenarioMetaEl.textContent =
+      "（" + sm.passed_scenarios + "/" + sm.total_scenarios + " 通过）";
+    auditScenariosEl.innerHTML = "";
+    if (!(a.scenarios || []).length) {
+      auditScenariosEl.innerHTML =
+        '<div class="empty">没有场景样例。可在「场景集回归」保存场景，或导入场景 JSON 后审计。' +
+        "不含场景时仅推导变量契约与 JSON Schema。</div>";
+    }
+    (a.scenarios || []).forEach(function (s, sidx) {
+      var row = document.createElement("div");
+      row.className = "audit-scenario-row audit-sc-" + s.status;
+      var issues = (a.flat_issues || []).filter(function (f) {
+        return f.scenario_index === sidx;
+      });
+      var html = '<div class="audit-sc-head">' +
+        '<span class="audit-sc-name">' + esc(s.name || ("场景 " + s.id)) + "</span>" +
+        "<code>" + esc(s.locale || "en") + "</code>";
+      if (s.status === "failed") {
+        html += '<span class="audit-badge audit-missing">失败 · ' +
+          s.issue_count + " 个错误</span>";
+      } else if (s.status === "passed") {
+        html += '<span class="audit-badge audit-ok">通过</span>';
+      }
+      html += "</div>";
+      if (s.error) {
+        html += '<div class="audit-sc-err">✕ ' + esc(s.error) + "</div>";
+      }
+      issues.forEach(function (f) {
+        html += '<div class="audit-sc-issue audit-sev-' + f.severity + '">' +
+          auditCodeBadge(f.code, f.severity) +
+          '<code class="audit-sc-var">' + esc(f.variable) + "</code>" +
+          '<span>' + esc(f.message.replace(/^变量 '[^']*' /, "")) + "</span></div>";
+      });
+      row.innerHTML = html;
+      auditScenariosEl.appendChild(row);
+    });
+
+    auditSchemaEl.textContent = JSON.stringify(a.json_schema, null, 2);
+  }
+
+  document.getElementById("btnAuditSaved").addEventListener("click", function () {
+    if (!scenarios.length) {
+      toast("「场景集回归」中还没有已保存的场景");
+      return;
+    }
+    runAudit(scenarios.map(function (sc) {
+      return { id: sc.id, name: sc.name, locale: sc.locale,
+               variables: sc.variables };
+    }), "saved");
+  });
+
+  document.getElementById("btnAuditImport").addEventListener("click", function () {
+    auditImportFileEl.value = "";
+    auditImportFileEl.click();
+  });
+
+  auditImportFileEl.addEventListener("change", function () {
+    var file = auditImportFileEl.files && auditImportFileEl.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      var data;
+      try { data = JSON.parse(String(reader.result)); }
+      catch (e) { toast("导入失败：文件不是合法 JSON"); return; }
+      var list = normalizeImportedScenarios(data);
+      if (!list) {
+        toast("导入失败：需要场景数组或包含 scenarios 数组的对象");
+        return;
+      }
+      toast("已导入 " + list.length + " 组场景");
+      runAudit(list, "imported");
+    };
+    reader.readAsText(file);
+  });
+
+  document.getElementById("btnAuditCopySchema").addEventListener("click", function () {
+    if (!lastAudit || !lastAudit.json_schema) {
+      toast("请先运行一次审计");
+      return;
+    }
+    copyText(JSON.stringify(lastAudit.json_schema, null, 2), "已复制 JSON Schema 草案");
+  });
+
+  document.getElementById("btnExportAudit").addEventListener("click", function () {
+    if (!lastAudit) { toast("请先运行一次审计"); return; }
+    var data = {
+      tool: "icu-branch-previewer",
+      report: "variable-contract-audit",
+      exported_at: new Date().toISOString(),
+      template: tpl.value,
+      locale: localeInput.value.trim() || "en",
+      scenario_source: auditSource,
+      scenarios: auditScenariosInput.map(function (sc) {
+        return { id: sc.id, name: sc.name, locale: sc.locale,
+                 variables: sc.variables };
+      }),
+      summary: lastAudit.summary,
+      contracts: lastAudit.contracts,
+      issues: lastAudit.issues,
+      scenario_results: lastAudit.scenarios,
+      json_schema: lastAudit.json_schema,
+    };
+    var blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "icu-contract-audit.json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+    toast("已导出审计 JSON");
+  });
+
+  // 模板变化时，若已有审计结果则自动重跑（导入/已保存场景保持来源不变）
+  tpl.addEventListener("input", function () {
+    if (lastAudit) {
+      var list = auditSource === "saved"
+        ? scenarios.map(function (sc) {
+            return { id: sc.id, name: sc.name, locale: sc.locale,
+                     variables: sc.variables };
+          })
+        : auditScenariosInput;
+      scheduleAudit(list, auditSource);
+    }
+  });
+
   /* ---------------- 初始化 ---------------- */
 
   tpl.value = DEFAULT_TEMPLATE;

@@ -124,6 +124,56 @@
     </div>
   </section>
 
+  <!-- 变量契约审计面板 -->
+  <section class="audit-panel">
+    <div class="panel-head audit-title-row">
+      <h2>变量契约审计</h2>
+      <span class="hint">根据模板 AST 推导每个变量在简单占位、number、plural、select、selectordinal 中的允许类型与必需性，批量审计场景样例并生成 JSON Schema 草案</span>
+      <div class="audit-actions">
+        <button id="btnAuditSaved" class="btn"
+                title="使用「场景集回归」中保存的场景样例进行审计">用已保存场景审计</button>
+        <button id="btnAuditImport" class="btn btn-outline"
+                title="从 JSON 文件导入多组场景样例（支持场景集导出格式）">导入场景 JSON</button>
+        <input id="auditImportFile" type="file" accept=".json,application/json" hidden>
+        <button id="btnAuditCopySchema" class="btn btn-outline"
+                title="把推导出的 JSON Schema 草案复制到剪贴板">复制 JSON Schema</button>
+        <button id="btnExportAudit" class="btn btn-outline"
+                title="导出包含契约、问题明细与 JSON Schema 的审计 JSON">导出审计 JSON</button>
+      </div>
+    </div>
+    <div class="audit-body">
+      <div id="auditSummaryBar" class="audit-summary-bar"></div>
+      <div class="audit-grid">
+        <!-- 左：按变量聚合的契约与问题 -->
+        <div class="audit-col">
+          <div class="panel-head">
+            <h3>变量契约（按变量聚合）</h3>
+            <span id="auditVarCount" class="hint"></span>
+          </div>
+          <div id="auditContracts" class="audit-contracts">
+            <div class="empty">尚未审计。点击「用已保存场景审计」，或「导入场景 JSON」载入多组样例。</div>
+          </div>
+        </div>
+
+        <!-- 右：场景审计结果 + Schema -->
+        <div class="audit-col">
+          <div class="panel-head">
+            <h3>场景审计结果</h3>
+            <span id="auditScenarioMeta" class="hint"></span>
+          </div>
+          <div id="auditScenarios" class="audit-scenarios">
+            <div class="empty">审计后在此显示每个场景的缺失变量、类型冲突与无效复数值。</div>
+          </div>
+          <div class="panel-head">
+            <h3>JSON Schema 草案</h3>
+            <span class="hint">按推导出的契约自动生成，可复制后按需调整</span>
+          </div>
+          <pre id="auditSchema" class="audit-schema">（审计后生成）</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- 版本对比面板 -->
   <section class="compare-panel">
     <div class="panel-head compare-title-row">
